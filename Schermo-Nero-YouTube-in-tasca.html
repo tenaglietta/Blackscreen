@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Blackscreen</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: #050507; color: #e8e8ea;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior: none; }
+  body.locked { position: fixed; inset: 0; overflow: hidden; }
+
+  #setup { min-height: 100dvh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 30px; padding: 24px; }
+  h1 { font-size: 40px; margin: 0; letter-spacing: 3px; font-weight: 300; text-transform: uppercase; }
+
+  button { border: none; border-radius: 12px; padding: 14px 18px; font-size: 16px; font-weight: 600;
+    cursor: pointer; color: #fff; background: #232330; }
+  button:active { filter: brightness(1.35); }
+  #goBtn { padding: 20px 56px; font-size: 19px; background: #000; border: 1px solid #333; }
+
+  /* ---------- Overlay "schermo spento" ---------- */
+  #overlay { position: fixed; inset: 0; background: #000; z-index: 9999; display: none;
+    touch-action: none; -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; cursor: none; }
+  #overlay.on { display: block; }
+  #ring { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    width: 120px; height: 120px; opacity: 0; transition: opacity .25s; pointer-events: none; }
+  #ring.show { opacity: 1; }
+  #ring circle { fill: none; }
+  #ringTxt { position: absolute; left: 50%; top: calc(50% + 80px); transform: translateX(-50%);
+    font-size: 12px; color: #3c3c44; white-space: nowrap; opacity: 0; transition: opacity .25s;
+    pointer-events: none; }
+  #ringTxt.show { opacity: 1; }
+  #toast { position: absolute; left: 50%; bottom: 10%; transform: translateX(-50%);
+    color: #4a4a52; font-size: 15px; opacity: 0; transition: opacity .5s; pointer-events: none;
+    text-align: center; max-width: 90%; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="setup">
+  <h1>Blackscreen</h1>
+  <button id="goBtn">⬛ Attiva</button>
+</div>
+
+<div id="overlay">
+  <svg id="ring" viewBox="0 0 120 120">
+    <circle cx="60" cy="60" r="54" stroke="#26262c" stroke-width="4"/>
+    <circle id="ringProg" cx="60" cy="60" r="54" stroke="#4a4a52" stroke-width="4" stroke-linecap="round"
+            stroke-dasharray="339.3" stroke-dashoffset="339.3" transform="rotate(-90 60 60)"/>
+  </svg>
+  <div id="ringTxt">trascina per sbloccare</div>
+  <div id="toast"></div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var goBtn = $('goBtn'), overlay = $('overlay'), ring = $('ring'),
+      ringProg = $('ringProg'), ringTxt = $('ringTxt'), toast = $('toast');
+
+  /* ---------- Wake Lock ---------- */
+
+  var wakeLock = null, wakeWarned = false;
+  function requestWake() {
+    if (!('wakeLock' in navigator)) {
+      if (!wakeWarned) { wakeWarned = true; showToast('Wake Lock non supportato: lo schermo potrebbe spegnersi', 3500); }
+      return;
+    }
+    navigator.wakeLock.request('screen').then(function (l) { wakeLock = l; })
+      .catch(function () {
+        if (!wakeWarned) { wakeWarned = true; showToast('Wake Lock negato: lo schermo potrebbe spegnersi', 3500); }
+      });
+  }
+  function releaseWake() { if (wakeLock) { try { wakeLock.release(); } catch (e) {} wakeLock = null; } }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible' && overlay.classList.contains('on')) requestWake();
+  });
+
+  /* ---------- Toast e ring ---------- */
+
+  var toastTimer = null;
+  function showToast(msg, ms) {
+    toast.textContent = msg;
+    toast.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toast.classList.remove('show'); }, ms || 1500);
+  }
+  function setRing(p) { // p = -1 nasconde, 0..1 progresso
+    if (p < 0) { ring.classList.remove('show'); ringTxt.classList.remove('show'); return; }
+    ring.classList.add('show');
+    ringProg.style.strokeDashoffset = String(339.3 * (1 - Math.min(1, p)));
+  }
+  function resetRing() { setRing(-1); ringTxt.classList.remove('show'); }
+
+  /* ---------- Modalità schermo nero ---------- */
+
+  var locked = false;
+
+  function enterBlackout() {
+    locked = true;
+    overlay.classList.add('on');
+    document.body.classList.add('locked');
+    try {
+      var r = document.documentElement.requestFullscreen && document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+      if (r && r.catch) r.catch(function () {});
+    } catch (e) {}
+    requestWake();
+    showToast('Tocchi bloccati · tieni premuto 1,5 s e trascina per sbloccare', 3000);
+  }
+
+  function exitBlackout() {
+    locked = false;
+    overlay.classList.remove('on');
+    document.body.classList.remove('locked');
+    resetRing();
+    stopLoop();
+    releaseWake();
+    if (document.fullscreenElement && document.exitFullscreen) {
+      try { var r = document.exitFullscreen(); if (r && r.catch) r.catch(function () {}); } catch (e) {}
+    }
+  }
+
+  goBtn.addEventListener('click', enterBlackout);
+
+  /* ---------- Motore dei gesti (niente click, solo pressioni lunche + swipe) ---------- */
+
+  var t0 = 0, curCount = 0, startX = 0, startY = 0, baseX = 0, baseY = 0,
+      curX = 0, curY = 0, swipeOK = false,
+      loop = null, mouseDown = false;
+
+  function startLoop() {
+    if (loop) return;
+    loop = setInterval(tick, 60);
+  }
+  function stopLoop() {
+    if (loop) { clearInterval(loop); loop = null; }
+  }
+
+  function beginGesture(x, y, count) {
+    t0 = Date.now(); curCount = count;
+    startX = curX = x; startY = curY = y;
+    swipeOK = false;
+    resetRing();
+    startLoop();
+  }
+  function moveGesture(x, y) { curX = x; curY = y; }
+  function endGesture(count) {
+    curCount = count;
+    if (count <= 0) { stopLoop(); resetRing(); }
+    else { t0 = Date.now(); swipeOK = false; resetRing(); }
+  }
+
+  function tick() {
+    if (!locked) { stopLoop(); return; }
+    var dt = Date.now() - t0;
+
+    if (curCount >= 2) {          // più dita: nessuna azione, si riparte da capo
+      resetRing();
+      return;
+    }
+
+    if (curCount === 1) {         // un dito: tieni premuto, poi trascina
+      if (dt < 400) { setRing(-1); return; }
+      if (dt < 1500) { setRing(dt / 1500); return; }
+      if (!swipeOK) { swipeOK = true; baseX = curX; baseY = curY; setRing(1); ringTxt.classList.add('show'); }
+      var dx = curX - baseX, dy = curY - baseY;
+      if (dx * dx + dy * dy >= 6400) exitBlackout(); // 80px
+    }
+  }
+
+  /* Eventi touch (primari su telefono) */
+  overlay.addEventListener('touchstart', function (e) {
+    e.preventDefault(); e.stopPropagation();
+    beginGesture(e.touches[0].clientX, e.touches[0].clientY, e.touches.length);
+  }, { passive: false });
+  overlay.addEventListener('touchmove', function (e) {
+    e.preventDefault(); e.stopPropagation();
+    moveGesture(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: false });
+  overlay.addEventListener('touchend', function (e) {
+    e.preventDefault(); e.stopPropagation();
+    endGesture(e.touches.length);
+  }, { passive: false });
+  overlay.addEventListener('touchcancel', function (e) {
+    e.preventDefault(); endGesture(e.touches.length);
+  }, { passive: false });
+
+  /* Fallback mouse (per provarla da computer) */
+  overlay.addEventListener('mousedown', function (e) {
+    e.preventDefault(); mouseDown = true;
+    beginGesture(e.clientX, e.clientY, 1);
+  });
+  overlay.addEventListener('mousemove', function (e) { if (mouseDown) moveGesture(e.clientX, e.clientY); });
+  window.addEventListener('mouseup', function () { if (mouseDown) { mouseDown = false; endGesture(0); } });
+
+  /* Blocco di tutto il resto */
+  ['contextmenu', 'selectstart', 'dragstart', 'wheel', 'dblclick'].forEach(function (ev) {
+    overlay.addEventListener(ev, function (e) { e.preventDefault(); e.stopPropagation(); });
+  });
+})();
+</script>
+</body>
+</html>
